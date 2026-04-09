@@ -13,9 +13,10 @@ import (
 	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
 	"github.com/penglongli/gin-metrics/ginmetrics"
-	"github.com/virzz/mulan/service"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+
+	"github.com/virzz/mulan/service"
 )
 
 // 默认超时配置
