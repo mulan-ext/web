@@ -91,8 +91,17 @@ func (s *Service) Serve() error {
 }
 
 var (
-	loggerSkipPaths   = []string{"/health", "/version", "/metrics", "/pprof"}
-	loggerSkipMethods = []string{http.MethodOptions, http.MethodHead, http.MethodTrace}
+	loggerSkipPaths = []string{
+		"/health",
+		"/version",
+		"/metrics",
+		"/pprof",
+	}
+	loggerSkipMethods = []string{
+		http.MethodOptions,
+		http.MethodHead,
+		http.MethodTrace,
+	}
 )
 
 func New(conf *Config, info *Info, fn func(gin.IRouter)) *Service {
