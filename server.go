@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -70,24 +71,15 @@ func (s *Service) Serve() error {
 	if !s.isBuild {
 		s.Build()
 	}
-	errCh := make(chan error, 1)
-	go func() {
-		err := s.server.ListenAndServe()
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		errCh <- err
-	}()
-	select {
-	case err := <-errCh:
-		return err
-	case <-time.After(3 * time.Second):
-		zap.L().Info("HTTP Server Listening on",
-			zap.String("host", s.conf.Host),
-			zap.Int("port", s.conf.Port),
-		)
+	zap.L().Info("HTTP Server Listening on",
+		zap.String("host", s.conf.Host),
+		zap.Int("port", s.conf.Port),
+	)
+	err := s.server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
+	return err
 }
 
 var (
@@ -156,14 +148,20 @@ func (s *Service) Build() *Service {
 	s.engine.GET("/health", versionHandler)
 
 	if s.conf.Pprof {
-		pprof.RouteRegister(s.engine, "/pprof")
+		if isLoopbackHost(s.conf.Host) {
+			pprof.RouteRegister(s.engine, "/pprof")
+		} else {
+			zap.L().Warn("pprof disabled on non-loopback listener")
+		}
 	}
 
-	m := ginmetrics.GetMonitor()
-	m.SetMetricPath("/metrics")
-	m.SetExcludePaths(loggerSkipPaths)
-	m.SetSlowTime(10)
-	m.Use(s.engine)
+	if s.conf.Metrics {
+		m := ginmetrics.GetMonitor()
+		m.SetMetricPath("/metrics")
+		m.SetExcludePaths(loggerSkipPaths)
+		m.SetSlowTime(10)
+		m.Use(s.engine)
+	}
 
 	// Register Router
 	if s.routerFn != nil {
@@ -182,4 +180,13 @@ func (s *Service) Build() *Service {
 	}
 	s.isBuild = true
 	return s
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -14,6 +14,7 @@ type Config struct {
 	Port     int    `json:"port" yaml:"port"`
 	Debug    bool   `json:"debug" yaml:"debug"`
 	Pprof    bool   `json:"pprof" yaml:"pprof"`
+	Metrics  bool   `json:"metrics" yaml:"metrics"`
 }
 
 func FlagSet(defaultPort int) *pflag.FlagSet {
@@ -24,6 +25,7 @@ func FlagSet(defaultPort int) *pflag.FlagSet {
 	fs.String("web.host", "127.0.0.1", "HTTP Listen Address")
 	fs.Int("web.port", defaultPort, "HTTP Listen Port")
 	fs.Bool("web.pprof", false, "Enable PProf")
+	fs.Bool("web.metrics", false, "Enable metrics")
 	return fs
 }
 

@@ -26,3 +26,7 @@ func (s *Config) WithPprof(v bool) *Config {
 	s.Pprof = v
 	return s
 }
+func (s *Config) WithMetrics(v bool) *Config {
+	s.Metrics = v
+	return s
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,4 +59,31 @@ func TestNew(t *testing.T) {
 
 	<-time.After(5 * time.Second)
 	webSrv.Close()
+}
+
+func TestMetricsCanBeExposedOnPublicListener(t *testing.T) {
+	service := web.New(&web.Config{
+		Host: "0.0.0.0", Port: 8080, Pprof: true, Metrics: true,
+	}, &web.Info{Name: "test"}, nil).Build()
+	metricsExposed := false
+	for _, route := range service.Routes() {
+		if strings.HasPrefix(route.Path, "/pprof") {
+			t.Fatalf("pprof route exposed on public listener: %s", route.Path)
+		}
+		if route.Path == "/metrics" {
+			metricsExposed = true
+		}
+	}
+	if !metricsExposed {
+		t.Fatal("metrics route is not exposed on public listener")
+	}
+}
+
+func TestServeReturnsListenError(t *testing.T) {
+	service := web.New(&web.Config{
+		Host: "invalid host", Port: 8080,
+	}, &web.Info{Name: "test"}, nil)
+	if err := service.Serve(); err == nil {
+		t.Fatal("Serve() error = nil")
+	}
 }
