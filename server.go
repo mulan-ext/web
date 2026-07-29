@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/penglongli/gin-metrics/ginmetrics"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 
 	"github.com/virzz/mulan/service"
 )
@@ -39,12 +37,15 @@ type Info struct {
 }
 
 type Service struct {
-	conf     *Config
-	info     *Info
-	routerFn func(gin.IRouter)
-	engine   *gin.Engine
-	server   *http.Server
-	isBuild  bool
+	conf             *Config
+	info             *Info
+	routerFn         func(gin.IRouter)
+	versionHandler   gin.HandlerFunc
+	healthzHandler   gin.HandlerFunc
+	readinessHandler gin.HandlerFunc
+	engine           *gin.Engine
+	server           *http.Server
+	isBuild          bool
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -82,19 +83,17 @@ func (s *Service) Serve() error {
 	return err
 }
 
-var (
-	loggerSkipPaths = []string{
-		"/health",
-		"/version",
-		"/metrics",
-		"/pprof",
-	}
-	loggerSkipMethods = []string{
-		http.MethodOptions,
-		http.MethodHead,
-		http.MethodTrace,
-	}
-)
+func (s *Service) SetVersionHandler(h gin.HandlerFunc) {
+	s.versionHandler = h
+}
+
+func (s *Service) SetReadinessHandler(h gin.HandlerFunc) {
+	s.readinessHandler = h
+}
+
+func (s *Service) SetHealthzHandler(h gin.HandlerFunc) {
+	s.healthzHandler = h
+}
 
 func New(conf *Config, info *Info, fn func(gin.IRouter)) *Service {
 	return &Service{conf: conf, info: info, routerFn: fn}
@@ -116,36 +115,18 @@ func (s *Service) Build() *Service {
 		// RequestID
 		requestid.New(),
 		// Logger
-		ginzap.GinzapWithConfig(ginLog, &ginzap.Config{
-			TimeFormat: time.RFC3339,
-			Skipper: func(c *gin.Context) bool {
-				if slices.Contains(loggerSkipMethods, c.Request.Method) {
-					return true
-				}
-				if c.Request.Response != nil &&
-					c.Request.Response.StatusCode == 404 {
-					return true
-				}
-				for _, path := range loggerSkipPaths {
-					if strings.HasSuffix(c.Request.URL.Path, path) {
-						return true
-					}
-				}
-				return false
-			},
-			Context: func(c *gin.Context) []zap.Field {
-				fields := []zapcore.Field{
-					zap.String("referer", c.Request.Referer()),
-					zap.String("requestid", requestid.Get(c)),
-				}
-				return fields
-			},
-		}),
+		defaultLogger(ginLog),
 	)
 
-	versionHandler := VersionHandler(s.info)
-	s.engine.GET("/version", versionHandler)
-	s.engine.GET("/health", versionHandler)
+	if s.versionHandler == nil {
+		s.versionHandler = VersionHandler(s.info)
+	}
+	if s.healthzHandler == nil {
+		s.healthzHandler = DefaultHealthHandler
+	}
+	if s.readinessHandler == nil {
+		s.readinessHandler = s.healthzHandler
+	}
 
 	if s.conf.Pprof {
 		if isLoopbackHost(s.conf.Host) {
@@ -168,6 +149,12 @@ func (s *Service) Build() *Service {
 		api := s.engine.Group(s.conf.Prefix)
 		s.routerFn(api)
 	}
+
+	s.registerDefaultGET("/version", s.versionHandler)
+	s.registerDefaultGET("/health", s.healthzHandler)
+	s.registerDefaultGET("/healthz", s.healthzHandler)
+	s.registerDefaultGET("/ready", s.readinessHandler)
+
 	// 配置 HTTP Server 超时防止慢速连接攻击
 	s.server = &http.Server{
 		Addr:              s.conf.Addr(),
@@ -180,6 +167,15 @@ func (s *Service) Build() *Service {
 	}
 	s.isBuild = true
 	return s
+}
+
+func (s *Service) registerDefaultGET(path string, handler gin.HandlerFunc) {
+	for _, route := range s.engine.Routes() {
+		if route.Method == http.MethodGet && route.Path == path {
+			return
+		}
+	}
+	s.engine.GET(path, handler)
 }
 
 func isLoopbackHost(host string) bool {

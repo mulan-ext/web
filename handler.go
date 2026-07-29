@@ -10,10 +10,21 @@ type Handler interface {
 	Register(gin.IRouter)
 }
 
+func ErrCodeHandler(c *gin.Context) {
+	c.JSON(200, rsp.S(rsp.Errors))
+}
+
 func VersionHandler(info *Info) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.String(200, info.Name+" "+info.Version+" "+info.Commit)
+		c.JSON(200, gin.H{
+			"name":     info.Name,
+			"version":  info.Version,
+			"commit":   info.Commit,
+			"built_at": info.BuildAt,
+		})
 	}
 }
 
-func ErrCodeHandler(c *gin.Context) { c.JSON(200, rsp.S(rsp.Errors)) }
+func DefaultHealthHandler(c *gin.Context) {
+	c.JSON(200, gin.H{"status": "ok", "code": 0})
+}

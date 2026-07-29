@@ -1,15 +1,15 @@
 package web_test
 
 import (
-	"fmt"
+	"encoding/json"
 	"net/http"
-	"net/http/httputil"
+	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/mulan-ext/web"
 )
@@ -19,7 +19,8 @@ func TestNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	zap.ReplaceGlobals(logger)
+	undo := zap.ReplaceGlobals(logger)
+	defer undo()
 
 	cfg := &web.Config{
 		Host:  "127.0.0.1",
@@ -30,7 +31,7 @@ func TestNew(t *testing.T) {
 		Name:    "test",
 		Version: "1.0.0",
 		Commit:  "dev",
-		BuildAt: time.Now().Format(time.RFC3339),
+		BuildAt: "2026-07-30T00:00:00Z",
 	}
 	webSrv := web.New(cfg, webInfo, func(api gin.IRouter) {
 		api.Handle("GET", "/aaa", func(c *gin.Context) {
@@ -38,27 +39,11 @@ func TestNew(t *testing.T) {
 			c.String(200, "Hello, World!")
 		})
 	})
-	// webSrv.Build()
-
-	go func() {
-		err := webSrv.Serve()
-		if err != nil && err != http.ErrServerClosed {
-			zap.L().Error("Failed to run http server", zap.Error(err))
-		}
-	}()
-
-	r, err := http.Get("http://127.0.0.1:3003/aaa")
-	if err != nil {
-		t.Fatal("Failed to get /aaa", "err", err.Error())
+	response := httptest.NewRecorder()
+	webSrv.Build().Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/aaa", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "Hello, World!" {
+		t.Fatalf("response = (%d, %q)", response.Code, response.Body.String())
 	}
-	body, err := httputil.DumpResponse(r, true)
-	if err != nil {
-		t.Fatal("Failed to dump response", "err", err.Error())
-	}
-	fmt.Println(string(body))
-
-	<-time.After(5 * time.Second)
-	webSrv.Close()
 }
 
 func TestMetricsCanBeExposedOnPublicListener(t *testing.T) {
@@ -85,5 +70,107 @@ func TestServeReturnsListenError(t *testing.T) {
 	}, &web.Info{Name: "test"}, nil)
 	if err := service.Serve(); err == nil {
 		t.Fatal("Serve() error = nil")
+	}
+}
+
+func TestVersionHandlerIsServiceScoped(t *testing.T) {
+	first := web.New(&web.Config{}, &web.Info{Name: "first"}, nil).Build()
+	second := web.New(&web.Config{}, &web.Info{Name: "second"}, nil).Build()
+
+	for _, test := range []struct {
+		service *web.Service
+		want    string
+	}{
+		{service: first, want: "first"},
+		{service: second, want: "second"},
+	} {
+		response := httptest.NewRecorder()
+		test.service.Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/version", nil))
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Name != test.want {
+			t.Fatalf("name = %q, want %q", body.Name, test.want)
+		}
+	}
+}
+
+func TestHandlerOverridesAreServiceScoped(t *testing.T) {
+	first := web.New(&web.Config{}, &web.Info{Name: "first"}, nil)
+	first.SetVersionHandler(func(c *gin.Context) {
+		c.Status(http.StatusCreated)
+	})
+	first.SetHealthzHandler(func(c *gin.Context) {
+		c.Status(http.StatusAccepted)
+	})
+	first.SetReadinessHandler(func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+	second := web.New(&web.Config{}, &web.Info{Name: "second"}, nil)
+	first.Build()
+	second.Build()
+
+	for path, want := range map[string]int{
+		"/version": http.StatusCreated,
+		"/healthz": http.StatusAccepted,
+		"/ready":   http.StatusNoContent,
+	} {
+		response := httptest.NewRecorder()
+		first.Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != want {
+			t.Fatalf("first %s status = %d, want %d", path, response.Code, want)
+		}
+	}
+
+	for _, path := range []string{"/version", "/healthz", "/ready"} {
+		response := httptest.NewRecorder()
+		second.Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("second %s status = %d", path, response.Code)
+		}
+	}
+}
+
+func TestApplicationProbeRoutesTakePrecedence(t *testing.T) {
+	service := web.New(&web.Config{Prefix: "/"}, &web.Info{Name: "test"}, func(router gin.IRouter) {
+		router.GET("/ready", func(c *gin.Context) { c.String(http.StatusOK, "application-ready") })
+		router.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "application-healthz") })
+	}).Build()
+
+	for path, want := range map[string]string{
+		"/ready":   "application-ready",
+		"/healthz": "application-healthz",
+	} {
+		response := httptest.NewRecorder()
+		service.Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Body.String() != want {
+			t.Fatalf("%s body = %q, want %q", path, response.Body.String(), want)
+		}
+	}
+}
+
+func TestDefaultLoggerSkipsDiagnosticAndNotFoundRequests(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	undo := zap.ReplaceGlobals(zap.New(core))
+	defer undo()
+
+	service := web.New(&web.Config{Prefix: "/"}, &web.Info{Name: "test"}, func(router gin.IRouter) {
+		router.GET("/business", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	}).Build()
+	for _, path := range []string{"/healthz", "/ready", "/missing"} {
+		response := httptest.NewRecorder()
+		service.Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	if observed.Len() != 0 {
+		t.Fatalf("diagnostic/not-found log count = %d", observed.Len())
+	}
+
+	response := httptest.NewRecorder()
+	service.Engine().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/business", nil))
+	if observed.Len() != 1 {
+		t.Fatalf("business log count = %d", observed.Len())
 	}
 }
